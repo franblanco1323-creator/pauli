@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <link
+      href="https://fonts.googleapis.com/css2?family=Poppins&display=swap"
+      rel="stylesheet"
+    />
+    <title>Productos</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <!-- Topbar fija con botón hamburguesa -->
+    <header class="topbar">
+      <button
+        class="hamburger"
+        aria-label="Abrir menú"
+        onclick="document.body.classList.toggle('menu-open')"
+      >
+        ☰
+      </button>
+      <div class="brand">Natura <span>Pauli</span></div>
+    </header>
+
+    <!-- Sidebar: en desktop a la izquierda; en mobile off-canvas -->
+    <nav id="sidebar" class="sidebar" aria-hidden="true">
+      <h1 style="margin: 0 0 8px 0; font-size: 20px; line-height: 1.1">
+        Natura<br />Pauli
+      </h1>
+      <a href="index.html">Home</a>
+      <a class="active" href="productos.html">Productos</a>
+      <a href="clientes.html">Clientes</a>
+      <a href="ventas.html">Ventas</a>
+    </nav>
+
+    <!-- Fondo para cerrar el menú en mobile -->
+    <div class="backdrop" id="backdrop"></div>
+
+    <main class="content">
+      <h2 class="title">Productos</h2>
+
+      <section class="card">
+        <div
+          style="
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            margin-bottom: 12px;
+          "
+        >
+          <input
+            id="buscar"
+            type="search"
+            placeholder="Buscar por nombre o detalle"
+            style="flex: 1; padding: 8px"
+          />
+          <select id="fMarca">
+            <option value="">Todas las marcas</option>
+            <option>Natura</option>
+            <option>Avon</option>
+          </select>
+          <button id="btnNuevo">+ Nuevo</button>
+        </div>
+
+        <!-- tabla con scroll horizontal en pantallas chicas -->
+        <div class="table-responsive">
+          <table id="tbl-productos">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Nombre</th>
+                <th>Detalle</th>
+                <th>Marca</th>
+                <th>Costo</th>
+                <th>Precio</th>
+                <th>Vencimiento</th>
+                <th>Cantidad</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Form modal simple -->
+      <section class="card" id="formBox" style="display: none">
+        <h3 id="formTitle">Nuevo producto</h3>
+        <form id="frmProducto">
+          <input type="hidden" name="id" />
+          <div
+            style="
+              display: grid;
+              grid-template-columns: repeat(2, minmax(0, 1fr));
+              gap: 12px;
+            "
+          >
+            <label>Nombre <input name="nombre" required /></label>
+            <label>Detalle <input name="detalle" /></label>
+            <label>
+              Marca
+              <select name="marca" required>
+                <option value="">Elegir...</option>
+                <option>Natura</option>
+                <option>Avon</option>
+              </select>
+            </label>
+            <label>Vencimiento <input name="vencimiento" type="date" /></label>
+            <label
+              >Costo
+              <input name="costo" type="number" step="0.01" min="0" required
+            /></label>
+            <label
+              >Precio venta
+              <input name="precio" type="number" step="0.01" min="0" required
+            /></label>
+            <label
+              >Cantidad <input name="cantidad" type="number" min="0" required
+            /></label>
+          </div>
+          <div style="margin-top: 12px; display: flex; gap: 8px">
+            <button type="submit" id="btnGuardar">Guardar</button>
+            <button type="button" id="btnCancelar">Cancelar</button>
+          </div>
+        </form>
+      </section>
+    </main>
+
+    <script src="productos.js"></script>
+
+    <!-- JS mínimo para abrir/cerrar el menú hamburguesa -->
+    <script>
+      (function () {
+        const btn = document.getElementById("btnMenu");
+        const sidebar = document.getElementById("sidebar");
+        const backdrop = document.getElementById("backdrop");
+        if (!btn || !sidebar || !backdrop) return;
+
+        function toggle() {
+          const open = sidebar.classList.toggle("open");
+          document.body.classList.toggle("no-scroll", open);
+          backdrop.classList.toggle("show", open);
+          btn.setAttribute("aria-expanded", String(open));
+          sidebar.setAttribute("aria-hidden", String(!open));
+          if (!open) btn.focus();
+        }
+
+        btn.addEventListener("click", toggle);
+        backdrop.addEventListener("click", toggle);
+        window.addEventListener("keydown", (e) => {
+          if (e.key === "Escape" && sidebar.classList.contains("open"))
+            toggle();
+        });
+      })();
+    </script>
+  </body>
+</html>

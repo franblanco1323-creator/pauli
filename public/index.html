@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <link
+      href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <title>Inicio</title>
+    <link rel="stylesheet" href="styles.css?v=3" />
+  </head>
+  <body>
+    <!-- Topbar fija con botón hamburguesa -->
+    <header class="topbar">
+      <button
+        class="hamburger"
+        aria-label="Abrir menú"
+        onclick="document.body.classList.toggle('menu-open')"
+      >
+        ☰
+      </button>
+      <div class="brand">Natura <span>Pauli</span></div>
+    </header>
+
+    <!-- Sidebar: en desktop a la izquierda; en mobile off-canvas -->
+    <nav id="sidebar" class="sidebar" aria-hidden="true">
+      <h1 style="margin: 0 0 8px 0; font-size: 20px; line-height: 1.1">
+        Natura<br />Pauli
+      </h1>
+      <a class="active" href="index.html">Home</a>
+      <a href="productos.html">Productos</a>
+      <a href="clientes.html">Clientes</a>
+      <a href="ventas.html">Ventas</a>
+    </nav>
+
+    <!-- Fondo para cerrar el menú en mobile -->
+    <div class="backdrop" id="backdrop"></div>
+
+    <!-- Contenido -->
+    <main class="content">
+      <h2 class="title">Natura</h2>
+
+      <section class="card">
+        <div class="muted" id="rangoExp">(vencen en los próximos 60 días)</div>
+        <h3>Productos por vencer</h3>
+
+        <!-- tabla con scroll horizontal en pantallas chicas -->
+        <div class="table-responsive">
+          <table id="tbl-exp">
+            <thead>
+              <tr>
+                <th>Producto</th>
+                <th>Detalle</th>
+                <th class="right">Precio</th>
+                <th>Vencimiento</th>
+                <th class="right">Cantidad</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="muted" id="rangoDues">
+          (cuotas con vencimiento en los próximos 7 días)
+        </div>
+        <h3>Cuotas próximas a vencer</h3>
+
+        <!-- tabla con scroll horizontal en pantallas chicas -->
+        <div class="table-responsive">
+          <table id="tbl-dues">
+            <thead>
+              <tr>
+                <th>Cliente</th>
+                <th># Cuota</th>
+                <th>Fecha de vencimiento</th>
+                <th class="right">Total a pagar</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <!-- Tu lógica actual -->
+    <script src="app.js"></script>
+
+    <!-- JS mínimo para abrir/cerrar el menú hamburguesa -->
+    <script>
+      (function () {
+        const btn = document.getElementById("btnMenu");
+        const sidebar = document.getElementById("sidebar");
+        const backdrop = document.getElementById("backdrop");
+        if (!btn || !sidebar || !backdrop) return;
+
+        function toggle() {
+          const open = sidebar.classList.toggle("open");
+          document.body.classList.toggle("no-scroll", open);
+          backdrop.classList.toggle("show", open);
+          btn.setAttribute("aria-expanded", String(open));
+          sidebar.setAttribute("aria-hidden", String(!open));
+          if (!open) btn.focus();
+        }
+
+        btn.addEventListener("click", toggle);
+        backdrop.addEventListener("click", toggle);
+        window.addEventListener("keydown", (e) => {
+          if (e.key === "Escape" && sidebar.classList.contains("open"))
+            toggle();
+        });
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,354 @@
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Poppins&display=swap"
+      rel="stylesheet"
+    />
+    <title>Ventas</title>
+    <link rel="stylesheet" href="styles.css" />
+    <style>
+      /* ayuditas visuales */
+      .note {
+        font-size: 12px;
+        opacity: 0.8;
+        margin-top: 4px;
+      }
+      .note.bad {
+        color: crimson;
+        font-weight: 600;
+      }
+      .note.good {
+        color: #2e7d32;
+        font-weight: 600;
+      }
+      .input-bad {
+        outline: 2px solid crimson;
+        border-color: crimson;
+      }
+      .toolbar {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        margin-bottom: 12px;
+      }
+      .toolbar .spacer {
+        flex: 1;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Topbar con menú hamburguesa -->
+    <header class="topbar">
+      <button
+        class="hamburger"
+        aria-label="Abrir menú"
+        onclick="document.body.classList.toggle('menu-open')"
+      >
+        ☰
+      </button>
+      <div class="brand">Natura <span>Pauli</span></div>
+    </header>
+
+    <!-- Sidebar: desktop fijo / mobile off-canvas -->
+    <nav id="sidebar" class="sidebar" aria-hidden="true">
+      <h1 style="margin: 0 0 8px 0; font-size: 20px; line-height: 1.1">
+        Natura<br />Pauli
+      </h1>
+      <a href="index.html">Home</a>
+      <a href="productos.html">Productos</a>
+      <a href="clientes.html">Clientes</a>
+      <a class="active" href="ventas.html">Ventas</a>
+    </nav>
+
+    <!-- Fondo para cerrar el menú en mobile -->
+    <div class="backdrop" id="backdrop"></div>
+
+    <main class="content">
+      <h2 class="title">Ventas</h2>
+
+      <!-- Listado -->
+      <section class="card">
+        <div class="toolbar">
+          <button id="btnNuevaVenta">+ Nueva venta</button>
+          <input
+            id="buscarVentas"
+            type="search"
+            placeholder="Filtrar por cliente, tipo o ID"
+            style="flex: 1; max-width: 380px; padding: 8px"
+          />
+          <span id="ventasCount" style="opacity: 0.8"></span>
+        </div>
+
+        <div class="table-responsive">
+          <table id="tbl-ventas">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Fecha</th>
+                <th>Cliente</th>
+                <th>Tipo</th>
+                <th>Total</th>
+                <th>Saldo</th>
+                <th>Interés</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Nueva venta -->
+      <section class="card" id="boxNuevaVenta" style="display: none">
+        <h3>Nueva venta</h3>
+        <form id="frmVenta">
+          <div
+            style="
+              display: grid;
+              grid-template-columns: repeat(3, minmax(0, 1fr));
+              gap: 12px;
+            "
+          >
+            <label>Fecha <input type="date" name="fecha" /></label>
+            <label
+              >Cliente
+              <select name="clienteId" required></select
+            ></label>
+            <label>
+              Tipo de pago
+              <select name="tipoPago" required>
+                <option value="Contado">Contado</option>
+                <option value="Credito">Crédito</option>
+              </select>
+            </label>
+          </div>
+
+          <h4 style="margin-top: 16px">Items</h4>
+          <div class="table-responsive">
+            <table id="tbl-items" style="min-width: 760px">
+              <thead>
+                <tr>
+                  <th style="width: 36px">#</th>
+                  <th>Producto</th>
+                  <th style="width: 160px">Cantidad</th>
+                  <th style="width: 160px">Precio unit.</th>
+                  <th style="width: 160px">Subtotal</th>
+                  <th style="width: 60px"></th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+              <tfoot>
+                <tr>
+                  <td colspan="6">
+                    <button type="button" id="btnAddItem">
+                      + Agregar item
+                    </button>
+                  </td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+
+          <div id="boxCredito" style="display: none; margin-top: 16px">
+            <h4>Crédito</h4>
+            <div
+              style="
+                display: grid;
+                grid-template-columns: repeat(4, minmax(0, 1fr));
+                gap: 12px;
+              "
+            >
+              <label
+                >Interés (%)
+                <input
+                  type="number"
+                  name="interes"
+                  min="0"
+                  step="0.01"
+                  value="0"
+              /></label>
+              <label
+                >Cuotas (cantidad)
+                <input
+                  type="number"
+                  name="cantidadCuotas"
+                  min="1"
+                  step="1"
+                  value="3"
+              /></label>
+              <label
+                >1º vencimiento <input type="date" name="primerVencimiento"
+              /></label>
+              <div style="display: flex; align-items: flex-end">
+                <button type="button" id="btnGenerarCuotas">
+                  Generar cuotas
+                </button>
+              </div>
+            </div>
+
+            <div class="table-responsive" style="margin-top: 8px">
+              <table id="tbl-cuotas" style="min-width: 560px">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Vence el</th>
+                    <th>Monto</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+                <tfoot>
+                  <tr>
+                    <td colspan="4" style="text-align: right; font-weight: 600">
+                      Total cuotas: <span id="sumCuotas">$ 0,00</span>
+                    </td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          </div>
+
+          <div
+            style="
+              display: flex;
+              gap: 12px;
+              justify-content: flex-end;
+              margin-top: 16px;
+            "
+          >
+            <div style="font-weight: 600; padding: 8px 0">
+              Total items: <span id="sumItems">$ 0,00</span>
+              <span
+                id="sumInteres"
+                style="margin-left: 12px; opacity: 0.8"
+              ></span>
+              <span
+                id="sumTotalConInteres"
+                style="margin-left: 12px; font-weight: 700"
+              ></span>
+            </div>
+          </div>
+
+          <div style="margin-top: 12px; display: flex; gap: 8px">
+            <button type="submit">Guardar venta</button>
+            <button type="button" id="btnCancelarVenta">Cancelar</button>
+          </div>
+        </form>
+      </section>
+
+      <!-- Detalle venta -->
+      <section class="card" id="boxDetalle" style="display: none">
+        <div style="display: flex; align-items: center; gap: 12px">
+          <h3 style="margin: 0">Detalle de venta</h3>
+          <button type="button" id="btnCerrarDetalle" class="btn btn-sm">
+            Cerrar
+          </button>
+        </div>
+        <div id="ventaCab" style="margin-top: 8px; opacity: 0.9"></div>
+
+        <h4 style="margin-top: 12px">Items</h4>
+        <div class="table-responsive">
+          <table id="tbl-det-items">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Producto</th>
+                <th>Cantidad</th>
+                <th>Precio unit.</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <div id="bloqueCuotas" style="display: none">
+          <h4 style="margin-top: 12px">Cuotas</h4>
+          <div class="table-responsive">
+            <table id="tbl-det-cuotas">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Vence</th>
+                  <th>Monto</th>
+                  <th>Pagado</th>
+                  <th>Saldo</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+
+          <h4 style="margin-top: 12px">Pagos</h4>
+          <div class="table-responsive">
+            <table id="tbl-det-pagos">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Fecha</th>
+                  <th>Monto</th>
+                  <th>Cuota</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- Registrar pago -->
+      <section class="card" id="boxPago" style="display: none">
+        <h3>Registrar pago</h3>
+        <form id="frmPago">
+          <input type="hidden" name="ventaId" />
+          <div
+            style="
+              display: grid;
+              grid-template-columns: repeat(3, minmax(0, 1fr));
+              gap: 12px;
+            "
+          >
+            <label
+              >Monto
+              <input type="number" name="monto" min="0" step="0.01" required
+            /></label>
+            <label>Fecha <input type="date" name="fecha" /></label>
+          </div>
+          <div style="margin-top: 12px; display: flex; gap: 8px">
+            <button type="submit">Aplicar</button>
+            <button type="button" id="btnCancelarPago">Cancelar</button>
+          </div>
+        </form>
+      </section>
+    </main>
+
+    <script src="ventas.js"></script>
+
+    <!-- JS para abrir/cerrar el menú hamburguesa -->
+    <script>
+      (function () {
+        const btn = document.getElementById("btnMenu");
+        const sidebar = document.getElementById("sidebar");
+        const backdrop = document.getElementById("backdrop");
+        if (!btn || !sidebar || !backdrop) return;
+
+        function toggle() {
+          const open = sidebar.classList.toggle("open");
+          document.body.classList.toggle("no-scroll", open);
+          backdrop.classList.toggle("show", open);
+          btn.setAttribute("aria-expanded", String(open));
+          sidebar.setAttribute("aria-hidden", String(!open));
+          if (!open) btn.focus();
+        }
+
+        btn.addEventListener("click", toggle);
+        backdrop.addEventListener("click", toggle);
+        window.addEventListener("keydown", (e) => {
+          if (e.key === "Escape" && sidebar.classList.contains("open"))
+            toggle();
+        });
+      })();
+    </script>
+  </body>
+</html>
