@@ -1,107 +1,132 @@
+// server.js (PostgreSQL + Supabase)
+// Ejecutar: node server.js
+require("dotenv").config();
+
+const dns = require("dns");
+dns.setDefaultResultOrder("ipv4first");
+
 const express = require("express");
-const sql = require("mssql");
-const cors = require("cors");
+const { Pool } = require("pg");
 const path = require("path");
+const fs = require("fs");
+const basicAuth = require("express-basic-auth");
+// (opcional) const cors = require("cors");
 
 const app = express();
-app.use(cors());
+
+// --- Parsers (deben ir después de crear app) ---
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// --- CORS + preflight (deja pasar OPTIONS antes del auth) ---
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", req.headers.origin || "*");
+  res.header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  if (req.method === "OPTIONS") return res.sendStatus(204); // clave para Basic Auth
+  next();
+});
+
+// (opcional) si querés usar la librería cors además de lo anterior:
+// app.use(cors());
+
+// --- Basic Auth (protege todo salvo /health/db) ---
+if (process.env.ADMIN_USER && process.env.ADMIN_PASS) {
+  const auth = basicAuth({
+    users: { [process.env.ADMIN_USER]: process.env.ADMIN_PASS },
+    challenge: true,
+    unauthorizedResponse: { error: "No autorizado" },
+  });
+
+  app.use((req, res, next) => {
+    // no desafiar preflights ni health
+    if (req.method === "OPTIONS") return res.sendStatus(204);
+    if (req.path.startsWith("/health/db")) return next();
+    return auth(req, res, next);
+  });
+} else {
+  console.warn("⚠️ Sin ADMIN_USER/ADMIN_PASS -> la app queda sin protección.");
+}
 
 // ---- STATIC FILES ----
 const PUBLIC_DIR = path.join(__dirname, "public");
 app.use(express.static(PUBLIC_DIR));
 app.get("/", (_req, res) => res.sendFile(path.join(PUBLIC_DIR, "index.html")));
 
-// ---- DB CONFIG ----
-const dbConfig = {
-  user: process.env.DB_USER || "sa",
-  password: process.env.DB_PASSWORD || "123456",
-  server: process.env.DB_SERVER || "localhost",
-  database: process.env.DB_NAME || "PaulaNatura",
-  options: {
-    encrypt: false,
-    trustServerCertificate: true,
-    useUTC: false, // evita corrimientos por UTC
-  },
-};
+/// ---- DB POOL (Supabase Postgres) ----
+
+// SSL (simple para pruebas; si usás CA, usa PGSSL_CA y cambia abajo)
+let ssl = { rejectUnauthorized: false };
+if (process.env.PGSSL_CA) {
+  const p = require("path").resolve(process.env.PGSSL_CA);
+  ssl = { ca: fs.readFileSync(p, "utf8") };
+}
+
+// ✅ FORZAR pooler con variables PG* (ignoramos por completo DATABASE_URL)
+function mask(s) {
+  return s ? s.slice(0, 3) + "****" : s;
+}
+console.log("PGHOST:", process.env.PGHOST);
+console.log("PGPORT:", process.env.PGPORT);
+console.log("PGUSER:", process.env.PGUSER);
+console.log("PGDATABASE:", process.env.PGDATABASE);
+console.log("PGPASSWORD:", mask(process.env.PGPASSWORD));
+
+const pool = new (require("pg").Pool)({
+  host: process.env.PGHOST, // ej: aws-1-sa-east-1.pooler.supabase.com
+  port: Number(process.env.PGPORT) || 6543,
+  user: process.env.PGUSER, // ej: postgres.xpqccnnckysrkwnddwct
+  password: process.env.PGPASSWORD,
+  database: process.env.PGDATABASE || "postgres",
+  ssl,
+});
+
+// ---- HEALTHCHECK DB ----
+app.get("/health/db", async (_req, res) => {
+  try {
+    const { rows } = await pool.query("select now() as now");
+    res.json({ ok: true, now: rows[0].now });
+  } catch (e) {
+    console.error("GET /health/db", e);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
 
 // ---- FECHAS (helpers) ----
-// Devuelve 'YYYY-MM-DD' en zona local SIN parsear strings 'YYYY-MM-DD' (para evitar corrimiento)
 function ymdLocal(dateLike) {
-  if (typeof dateLike === "string" && /^\d{4}-\d{2}-\d{2}$/.test(dateLike)) {
-    return dateLike; // ya está bien
-  }
+  if (typeof dateLike === "string" && /^\d{4}-\d{2}-\d{2}$/.test(dateLike))
+    return dateLike;
   const d = dateLike ? new Date(dateLike) : new Date();
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
 }
-
-// === CAMBIO ===
-// Convierte 'YYYY-MM-DD' a Date LOCAL a las 12:00 (evita desfases por zona horaria).
-// Si viene un ISO completo, lo parsea tal cual.
+// Date a las 12:00 local (evita corrimientos en timestamps sin zona)
 function dateFromLocalYMD(dateLike) {
   if (typeof dateLike === "string" && /^\d{4}-\d{2}-\d{2}$/.test(dateLike)) {
     const [y, m, d] = dateLike.split("-").map(Number);
-    return new Date(y, m - 1, d, 12, 0, 0, 0); // local 12:00
+    return new Date(y, m - 1, d, 12, 0, 0, 0);
   }
   const d = dateLike ? new Date(dateLike) : new Date();
-  if (Number.isNaN(d.getTime())) return new Date();
-  return d;
+  return isNaN(d) ? new Date() : d;
 }
 
-// ---- HELPERS ----
-async function hasTable(pool, tableName) {
-  try {
-    const rs = await pool
-      .request()
-      .input("table", sql.VarChar, tableName.split(".").pop())
-      .query(
-        "SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = @table"
-      );
-    return rs.recordset.length > 0;
-  } catch (e) {
-    console.error("hasTable", tableName, e.message);
-    return false;
-  }
+// ---- Helpers de normalización ----
+function nv(v) {
+  if (v === undefined || v === null) return null;
+  const s = String(v).trim();
+  return s.length ? s : null;
 }
-
-async function resolveItemColumns(pool, itemsTable) {
-  const productoIdCol = "productoId";
-  const cantidadCol = "cantidad";
-  const ventaIdCol = "ventaId";
-  let pUnitCol = null;
-  let subTotalCol = null;
-
-  try {
-    const rs = await pool.request().query(`
-      SELECT COLUMN_NAME
-      FROM INFORMATION_SCHEMA.COLUMNS
-      WHERE TABLE_NAME = '${itemsTable.split(".").pop()}'
-    `);
-    const cols = rs.recordset.map((r) => r.COLUMN_NAME.toLowerCase());
-    if (cols.includes("preciounit")) pUnitCol = "precioUnit";
-    else if (cols.includes("punit")) pUnitCol = "pUnit";
-    if (cols.includes("subtotal")) subTotalCol = "subTotal";
-  } catch (e) {
-    console.error("resolveItemColumns", e.message);
-  }
-
-  const pUnitExpr = pUnitCol ? `i.${pUnitCol}` : "p.precio";
-  const subTotalExpr = subTotalCol
-    ? `i.${subTotalCol}`
-    : `${pUnitCol ? `i.${pUnitCol}` : "p.precio"} * i.${cantidadCol}`;
-
-  return {
-    pUnitCol,
-    subTotalCol,
-    productoIdCol,
-    cantidadCol,
-    ventaIdCol,
-    pUnitExpr,
-    subTotalExpr,
-  };
+function ymdOrNull(v) {
+  if (v === undefined || v === null || String(v).trim() === "") return null;
+  if (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
+  const d = new Date(v);
+  if (isNaN(d)) return null;
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
 }
 
 // ===================== PRODUCTOS =====================
@@ -109,158 +134,194 @@ app.get("/api/productos", async (req, res) => {
   try {
     const buscar = String(req.query.buscar || "").trim();
     const marca = String(req.query.marca || "").trim();
-    const pool = await sql.connect(dbConfig);
 
-    const where = [];
-    if (buscar) where.push("(p.nombre LIKE @q OR p.detalle LIKE @q)");
-    if (marca) where.push("p.marca = @marca");
-    const whereSql = where.length ? "WHERE " + where.join(" AND ") : "";
+    const params = [];
+    let where = [];
+    if (buscar) {
+      params.push(`%${buscar}%`);
+      where.push(
+        `(p.nombre ILIKE $${params.length} OR p.detalle ILIKE $${params.length})`
+      );
+    }
+    if (marca) {
+      params.push(marca);
+      where.push(`p.marca = $${params.length}`);
+    }
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
-    const r = await pool
-      .request()
-      .input("q", sql.NVarChar, `%${buscar}%`)
-      .input("marca", sql.NVarChar, marca || null).query(`
-        SELECT p.id, p.nombre, p.detalle, p.marca,
-               CASE WHEN p.vencimiento IS NULL
-                 THEN NULL
-                 ELSE CONVERT(varchar(10), p.vencimiento, 23) + 'T12:00:00'
-               END AS vencimiento,
-               p.costo, p.precio, p.cantidad
-        FROM dbo.Productos p
-        ${whereSql}
-        ORDER BY p.nombre
-      `);
-    res.json(r.recordset || []);
+    const { rows } = await pool.query(
+      `
+      SELECT p.id, p.nombre, p.detalle, p.marca,
+             CASE WHEN p.vencimiento IS NULL
+               THEN NULL
+               ELSE TO_CHAR(p.vencimiento, 'YYYY-MM-DD') || 'T12:00:00'
+             END AS vencimiento,
+             p.costo, p.precio, p.cantidad
+      FROM productos p
+      ${whereSql}
+      ORDER BY p.nombre
+      `,
+      params
+    );
+    res.json(rows || []);
   } catch (e) {
-    console.error("GET /api/productos", e.message);
+    console.error("GET /api/productos", e);
     res.status(500).json({ error: "Error obteniendo productos" });
   }
 });
-// ======== PRODUCTOS: crear ========
-app.post("/api/productos", async (req, res) => {
+
+// GET producto por id
+app.get("/api/productos/:id", async (req, res) => {
   try {
-    const { nombre, detalle, marca, vencimiento, costo, precio, cantidad } =
-      req.body || {};
-    if (!nombre)
-      return res.status(400).json({ error: "El nombre es obligatorio" });
+    const id = Number(req.params.id);
+    if (!(id > 0)) return res.status(400).json({ error: "ID inválido" });
 
-    // vencimiento puede venir 'YYYY-MM-DD' o ISO; guardamos como DATE o NULL
-    const vRaw = vencimiento ? ymdLocal(vencimiento) : null;
-
-    const pool = await sql.connect(dbConfig);
-    const r = await pool
-      .request()
-      .input("nombre", sql.NVarChar, nombre)
-      .input("detalle", sql.NVarChar, detalle || null)
-      .input("marca", sql.NVarChar, marca || null)
-      .input("vencimiento", sql.VarChar, vRaw) // texto 'YYYY-MM-DD' o null
-      .input("costo", sql.Decimal(12, 2), costo != null ? Number(costo) : null)
-      .input("precio", sql.Decimal(12, 2), precio != null ? Number(precio) : 0)
-      .input("cantidad", sql.Int, cantidad != null ? Number(cantidad) : 0)
-      .query(`
-        INSERT INTO dbo.Productos (nombre, detalle, marca, vencimiento, costo, precio, cantidad)
-        OUTPUT INSERTED.id
-        VALUES (@nombre, @detalle, @marca, CASE WHEN @vencimiento IS NULL THEN NULL ELSE CAST(@vencimiento AS DATE) END,
-                @costo, @precio, @cantidad)
-      `);
-
-    const id = r.recordset[0].id;
-    res.status(201).json({
-      id,
-      nombre,
-      detalle,
-      marca,
-      vencimiento: vRaw ? `${vRaw}T12:00:00` : null,
-      costo: Number(costo ?? 0),
-      precio: Number(precio ?? 0),
-      cantidad: Number(cantidad ?? 0),
-    });
+    const { rows } = await pool.query(
+      `SELECT p.id, p.nombre, p.detalle, p.marca,
+              CASE WHEN p.vencimiento IS NULL
+                   THEN NULL
+                   ELSE TO_CHAR(p.vencimiento,'YYYY-MM-DD') || 'T12:00:00'
+              END AS vencimiento,
+              p.costo, p.precio, p.cantidad
+       FROM productos p
+       WHERE p.id = $1`,
+      [id]
+    );
+    if (!rows.length)
+      return res.status(404).json({ error: "Producto no encontrado" });
+    res.json(rows[0]);
   } catch (e) {
-    console.error("POST /api/productos", e.message);
-    res.status(500).json({ error: "Error creando producto" });
+    console.error("GET /api/productos/:id", e);
+    res.status(500).json({ error: "Error obteniendo producto" });
   }
 });
 
-// ======== PRODUCTOS: editar ========
+// Crear producto
+app.post("/api/productos", async (req, res) => {
+  try {
+    const b = req.body || {};
+    const nombre = nv(b.nombre); // requerido
+    const detalle = nv(b.detalle);
+    const marca = nv(b.marca);
+    const vencimiento = ymdOrNull(b.vencimiento);
+    const costo = Number(b.costo ?? 0);
+    const precio = Number(b.precio ?? 0);
+    const cantidad = Number(b.cantidad ?? 0);
+
+    if (!nombre)
+      return res.status(400).json({ error: "El nombre es obligatorio" });
+    if (costo < 0 || precio < 0 || cantidad < 0) {
+      return res
+        .status(400)
+        .json({ error: "Costo, precio y cantidad no pueden ser negativos" });
+    }
+
+    const params = [
+      nombre,
+      detalle,
+      marca,
+      vencimiento,
+      costo,
+      precio,
+      cantidad,
+    ];
+    const { rows } = await pool.query(
+      `INSERT INTO productos (nombre, detalle, marca, vencimiento, costo, precio, cantidad)
+       VALUES ($1,$2,$3,CAST($4 AS DATE),$5,$6,$7)
+       RETURNING id, nombre, detalle, marca,
+                 CASE WHEN vencimiento IS NULL THEN NULL ELSE TO_CHAR(vencimiento,'YYYY-MM-DD') || 'T12:00:00' END AS vencimiento,
+                 costo, precio, cantidad`,
+      params
+    );
+    res.status(201).json(rows[0]);
+  } catch (e) {
+    console.error("POST /api/productos", e);
+    res
+      .status(400)
+      .json({ error: e.message || "No se pudo crear el producto" });
+  }
+});
+
+// Editar producto
 app.put("/api/productos/:id", async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!(id > 0)) return res.status(400).json({ error: "ID inválido" });
 
-    const { nombre, detalle, marca, vencimiento, costo, precio, cantidad } =
-      req.body || {};
+    const b = req.body || {};
+    const nombre = nv(b.nombre);
+    const detalle = nv(b.detalle);
+    const marca = nv(b.marca);
+    const vencimiento = ymdOrNull(b.vencimiento);
+    const costo = Number(b.costo ?? 0);
+    const precio = Number(b.precio ?? 0);
+    const cantidad = Number(b.cantidad ?? 0);
+
     if (!nombre)
       return res.status(400).json({ error: "El nombre es obligatorio" });
+    if (costo < 0 || precio < 0 || cantidad < 0) {
+      return res
+        .status(400)
+        .json({ error: "Costo, precio y cantidad no pueden ser negativos" });
+    }
 
-    const vRaw = vencimiento ? ymdLocal(vencimiento) : null;
-
-    const pool = await sql.connect(dbConfig);
-    const r = await pool
-      .request()
-      .input("id", sql.Int, id)
-      .input("nombre", sql.NVarChar, nombre)
-      .input("detalle", sql.NVarChar, detalle || null)
-      .input("marca", sql.NVarChar, marca || null)
-      .input("vencimiento", sql.VarChar, vRaw)
-      .input("costo", sql.Decimal(12, 2), costo != null ? Number(costo) : null)
-      .input("precio", sql.Decimal(12, 2), precio != null ? Number(precio) : 0)
-      .input("cantidad", sql.Int, cantidad != null ? Number(cantidad) : 0)
-      .query(`
-        UPDATE dbo.Productos
-        SET nombre=@nombre,
-            detalle=@detalle,
-            marca=@marca,
-            vencimiento = CASE WHEN @vencimiento IS NULL THEN NULL ELSE CAST(@vencimiento AS DATE) END,
-            costo=@costo,
-            precio=@precio,
-            cantidad=@cantidad
-        WHERE id=@id
-      `);
-
-    if (r.rowsAffected[0] === 0)
-      return res.status(404).json({ error: "Producto no encontrado" });
-    res.json({
-      id,
+    const params = [
       nombre,
       detalle,
       marca,
-      vencimiento: vRaw ? `${vRaw}T12:00:00` : null,
-      costo: Number(costo ?? 0),
-      precio: Number(precio ?? 0),
-      cantidad: Number(cantidad ?? 0),
-    });
+      vencimiento,
+      costo,
+      precio,
+      cantidad,
+      id,
+    ];
+    const { rows } = await pool.query(
+      `UPDATE productos
+         SET nombre=$1, detalle=$2, marca=$3, vencimiento=CAST($4 AS DATE),
+             costo=$5, precio=$6, cantidad=$7
+       WHERE id=$8
+       RETURNING id, nombre, detalle, marca,
+                 CASE WHEN vencimiento IS NULL THEN NULL ELSE TO_CHAR(vencimiento,'YYYY-MM-DD') || 'T12:00:00' END AS vencimiento,
+                 costo, precio, cantidad`,
+      params
+    );
+    if (!rows.length)
+      return res.status(404).json({ error: "Producto no encontrado" });
+    res.json(rows[0]);
   } catch (e) {
-    console.error("PUT /api/productos/:id", e.message);
-    res.status(500).json({ error: "Error actualizando producto" });
+    console.error("PUT /api/productos/:id", e);
+    res
+      .status(400)
+      .json({ error: e.message || "No se pudo actualizar el producto" });
   }
 });
 
-// ======== PRODUCTOS: eliminar ========
+// Eliminar producto (bloquea si está usado en ventas)
 app.delete("/api/productos/:id", async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!(id > 0)) return res.status(400).json({ error: "ID inválido" });
 
-    const pool = await sql.connect(dbConfig);
-    const r = await pool.request().input("id", sql.Int, id).query(`
-      DELETE FROM dbo.Productos WHERE id=@id
-    `);
+    const ref = await pool.query(
+      `SELECT 1 FROM ventaitems WHERE productoid=$1 LIMIT 1`,
+      [id]
+    );
+    if (ref.rowCount > 0) {
+      return res.status(400).json({
+        error: "No se puede eliminar: el producto está usado en ventas.",
+      });
+    }
 
-    if (r.rowsAffected[0] === 0)
+    const del = await pool.query(`DELETE FROM productos WHERE id=$1`, [id]);
+    if (del.rowCount === 0)
       return res.status(404).json({ error: "Producto no encontrado" });
+
     res.json({ ok: true });
   } catch (e) {
-    // Violación de FK (producto usado en ventas, etc.)
-    if (e.number === 547) {
-      return res
-        .status(409)
-        .json({
-          error:
-            "No se puede eliminar: el producto está referenciado en otros registros",
-        });
-    }
-    console.error("DELETE /api/productos/:id", e.message);
-    res.status(500).json({ error: "Error eliminando producto" });
+    console.error("DELETE /api/productos/:id", e);
+    res
+      .status(400)
+      .json({ error: e.message || "No se pudo eliminar el producto" });
   }
 });
 
@@ -268,142 +329,144 @@ app.delete("/api/productos/:id", async (req, res) => {
 app.get("/api/clientes", async (req, res) => {
   try {
     const buscar = String(req.query.buscar || "").trim();
-    const pool = await sql.connect(dbConfig);
-    const where = buscar
-      ? `WHERE c.nombre LIKE @q OR c.apellido LIKE @q OR c.email LIKE @q OR c.telefono LIKE @q`
-      : "";
-    const r = await pool.request().input("q", sql.NVarChar, `%${buscar}%`)
-      .query(`
-        SELECT c.id, c.nombre, c.apellido, c.telefono, c.email, c.direccion, c.ciudad, c.notas
-        FROM dbo.Clientes c
-        ${where}
-        ORDER BY c.apellido, c.nombre
-      `);
-    res.json(r.recordset || []);
+    let where = "";
+    let params = [];
+    if (buscar) {
+      params = [`%${buscar}%`];
+      where = `WHERE c.nombre ILIKE $1 OR c.apellido ILIKE $1 OR c.email ILIKE $1 OR c.telefono ILIKE $1`;
+    }
+    const { rows } = await pool.query(
+      `
+      SELECT c.id, c.nombre, c.apellido, c.telefono, c.email, c.direccion, c.ciudad, c.notas
+      FROM clientes c
+      ${where}
+      ORDER BY c.apellido NULLS LAST, c.nombre
+      `,
+      params
+    );
+    res.json(rows || []);
   } catch (e) {
-    console.error("GET /api/clientes", e.message);
+    console.error("GET /api/clientes", e);
     res.status(500).json({ error: "Error obteniendo clientes" });
   }
 });
-// ======== CLIENTES: crear ========
-app.post("/api/clientes", async (req, res) => {
+
+// GET cliente por id
+app.get("/api/clientes/:id", async (req, res) => {
   try {
-    const { nombre, apellido, telefono, email, direccion, ciudad, notas } =
-      req.body || {};
-    if (!nombre || !apellido) {
-      return res
-        .status(400)
-        .json({ error: "Nombre y apellido son obligatorios" });
-    }
+    const id = Number(req.params.id);
+    if (!(id > 0)) return res.status(400).json({ error: "ID inválido" });
 
-    const pool = await sql.connect(dbConfig);
-    const r = await pool
-      .request()
-      .input("nombre", sql.NVarChar, nombre)
-      .input("apellido", sql.NVarChar, apellido)
-      .input("telefono", sql.NVarChar, telefono || null)
-      .input("email", sql.NVarChar, email || null)
-      .input("direccion", sql.NVarChar, direccion || null)
-      .input("ciudad", sql.NVarChar, ciudad || null)
-      .input("notas", sql.NVarChar, notas || null).query(`
-        INSERT INTO dbo.Clientes (nombre, apellido, telefono, email, direccion, ciudad, notas)
-        OUTPUT INSERTED.id
-        VALUES (@nombre, @apellido, @telefono, @email, @direccion, @ciudad, @notas)
-      `);
+    const { rows } = await pool.query(
+      `SELECT id, nombre, apellido, telefono, email, direccion, ciudad, notas
+       FROM clientes WHERE id = $1`,
+      [id]
+    );
+    if (!rows.length)
+      return res.status(404).json({ error: "Cliente no encontrado" });
 
-    const id = r.recordset[0].id;
-    res
-      .status(201)
-      .json({
-        id,
-        nombre,
-        apellido,
-        telefono,
-        email,
-        direccion,
-        ciudad,
-        notas,
-      });
+    res.json(rows[0]);
   } catch (e) {
-    console.error("POST /api/clientes", e.message);
-    res.status(500).json({ error: "Error creando cliente" });
+    console.error("GET /api/clientes/:id", e);
+    res.status(500).json({ error: "Error obteniendo cliente" });
   }
 });
 
-// ======== CLIENTES: editar ========
+// Crear cliente
+app.post("/api/clientes", async (req, res) => {
+  try {
+    const b = req.body || {};
+    const nombre = nv(b.nombre); // requerido
+    const apellido = nv(b.apellido);
+    const telefono = nv(b.telefono);
+    const email = nv(b.email);
+    const direccion = nv(b.direccion);
+    const ciudad = nv(b.ciudad);
+    const notas = nv(b.notas);
+
+    if (!nombre)
+      return res.status(400).json({ error: "El nombre es obligatorio" });
+
+    const { rows } = await pool.query(
+      `INSERT INTO clientes (nombre, apellido, telefono, email, direccion, ciudad, notas)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)
+       RETURNING id, nombre, apellido, telefono, email, direccion, ciudad, notas`,
+      [nombre, apellido, telefono, email, direccion, ciudad, notas]
+    );
+
+    res.status(201).json(rows[0]);
+  } catch (e) {
+    console.error("POST /api/clientes", e);
+    res.status(400).json({ error: e.message || "No se pudo crear el cliente" });
+  }
+});
+
+// Editar cliente
 app.put("/api/clientes/:id", async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!(id > 0)) return res.status(400).json({ error: "ID inválido" });
 
-    const { nombre, apellido, telefono, email, direccion, ciudad, notas } =
-      req.body || {};
-    if (!nombre || !apellido) {
-      return res
-        .status(400)
-        .json({ error: "Nombre y apellido son obligatorios" });
-    }
+    const b = req.body || {};
+    const nombre = nv(b.nombre);
+    const apellido = nv(b.apellido);
+    const telefono = nv(b.telefono);
+    const email = nv(b.email);
+    const direccion = nv(b.direccion);
+    const ciudad = nv(b.ciudad);
+    const notas = nv(b.notas);
 
-    const pool = await sql.connect(dbConfig);
-    const r = await pool
-      .request()
-      .input("id", sql.Int, id)
-      .input("nombre", sql.NVarChar, nombre)
-      .input("apellido", sql.NVarChar, apellido)
-      .input("telefono", sql.NVarChar, telefono || null)
-      .input("email", sql.NVarChar, email || null)
-      .input("direccion", sql.NVarChar, direccion || null)
-      .input("ciudad", sql.NVarChar, ciudad || null)
-      .input("notas", sql.NVarChar, notas || null).query(`
-        UPDATE dbo.Clientes
-        SET nombre=@nombre, apellido=@apellido, telefono=@telefono, email=@email,
-            direccion=@direccion, ciudad=@ciudad, notas=@notas
-        WHERE id=@id
-      `);
+    const { rows } = await pool.query(
+      `UPDATE clientes
+         SET nombre = $1,
+             apellido = $2,
+             telefono = $3,
+             email = $4,
+             direccion = $5,
+             ciudad = $6,
+             notas = $7
+       WHERE id = $8
+       RETURNING id, nombre, apellido, telefono, email, direccion, ciudad, notas`,
+      [nombre, apellido, telefono, email, direccion, ciudad, notas, id]
+    );
 
-    if (r.rowsAffected[0] === 0)
+    if (!rows.length)
       return res.status(404).json({ error: "Cliente no encontrado" });
-    res.json({
-      id,
-      nombre,
-      apellido,
-      telefono,
-      email,
-      direccion,
-      ciudad,
-      notas,
-    });
+    res.json(rows[0]);
   } catch (e) {
-    console.error("PUT /api/clientes/:id", e.message);
-    res.status(500).json({ error: "Error actualizando cliente" });
+    console.error("PUT /api/clientes/:id", e);
+    res
+      .status(400)
+      .json({ error: e.message || "No se pudo actualizar el cliente" });
   }
 });
 
-// ======== CLIENTES: eliminar ========
+// Eliminar cliente (bloquea si tiene ventas)
 app.delete("/api/clientes/:id", async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!(id > 0)) return res.status(400).json({ error: "ID inválido" });
 
-    const pool = await sql.connect(dbConfig);
-    const r = await pool.request().input("id", sql.Int, id).query(`
-      DELETE FROM dbo.Clientes WHERE id=@id
-    `);
+    const ref = await pool.query(
+      `SELECT 1 FROM ventas WHERE clienteid=$1 LIMIT 1`,
+      [id]
+    );
+    if (ref.rowCount > 0) {
+      return res.status(400).json({
+        error: "No se puede eliminar: el cliente tiene ventas asociadas.",
+      });
+    }
 
-    if (r.rowsAffected[0] === 0)
+    const del = await pool.query(`DELETE FROM clientes WHERE id=$1`, [id]);
+    if (del.rowCount === 0)
       return res.status(404).json({ error: "Cliente no encontrado" });
+
     res.json({ ok: true });
   } catch (e) {
-    // Violación de FK (cliente con ventas, etc.)
-    if (e.number === 547) {
-      return res
-        .status(409)
-        .json({
-          error: "No se puede eliminar: el cliente tiene datos relacionados",
-        });
-    }
-    console.error("DELETE /api/clientes/:id", e.message);
-    res.status(500).json({ error: "Error eliminando cliente" });
+    console.error("DELETE /api/clientes/:id", e);
+    res
+      .status(400)
+      .json({ error: e.message || "No se pudo eliminar el cliente" });
   }
 });
 
@@ -411,23 +474,23 @@ app.delete("/api/clientes/:id", async (req, res) => {
 // Listado
 app.get("/api/ventas", async (_req, res) => {
   try {
-    const pool = await sql.connect(dbConfig);
-    const rs = await pool.request().query(`
+    const { rows } = await pool.query(`
       SELECT v.id,
-             CONVERT(varchar(10), v.fecha, 23) + 'T12:00:00' AS fecha,
-             v.tipoPago, v.total, v.saldo, v.interes,
-             c.id AS clienteId, c.apellido, c.nombre
-      FROM dbo.Ventas v
-      JOIN dbo.Clientes c ON c.id = v.clienteId
+             TO_CHAR(v.fecha, 'YYYY-MM-DD') || 'T12:00:00' AS fecha,
+             v.tipopago AS "tipoPago",
+             v.total, v.saldo, v.interes,
+             c.id AS "clienteId", c.apellido, c.nombre
+      FROM ventas v
+      JOIN clientes c ON c.id = v.clienteid
       ORDER BY v.id DESC
     `);
-    const ventas = rs.recordset.map((v) => ({
+    const ventas = rows.map((v) => ({
       ...v,
-      cliente: `${v.apellido}, ${v.nombre}`,
+      cliente: `${v.apellido || ""}${v.apellido ? ", " : ""}${v.nombre || ""}`,
     }));
     res.json(ventas);
   } catch (err) {
-    console.error("GET /api/ventas", err.message);
+    console.error("GET /api/ventas", err);
     res.status(500).json({ error: "Error obteniendo ventas" });
   }
 });
@@ -436,105 +499,100 @@ app.get("/api/ventas", async (_req, res) => {
 app.get("/api/ventas/:id", async (req, res) => {
   const ventaId = Number(req.params.id);
   try {
-    const pool = await sql.connect(dbConfig);
-
-    const rsVenta = await pool.request().input("id", sql.Int, ventaId).query(`
+    const { rows: rsVenta } = await pool.query(
+      `
       SELECT v.id,
-             CONVERT(varchar(10), v.fecha, 23) + 'T12:00:00' AS fecha,
-             v.tipoPago, v.total, v.saldo, v.interes,
-             c.id AS clienteId, c.apellido, c.nombre
-      FROM dbo.Ventas v
-      JOIN dbo.Clientes c ON c.id = v.clienteId
-      WHERE v.id = @id
-    `);
-    if (!rsVenta.recordset.length)
+             TO_CHAR(v.fecha, 'YYYY-MM-DD') || 'T12:00:00' AS fecha,
+             v.tipopago AS "tipoPago", v.total, v.saldo, v.interes,
+             c.id AS "clienteId", c.apellido, c.nombre
+      FROM ventas v
+      JOIN clientes c ON c.id = v.clienteid
+      WHERE v.id = $1
+      `,
+      [ventaId]
+    );
+    if (!rsVenta.length)
       return res.status(404).json({ error: "Venta no encontrada" });
-
     const venta = {
-      ...rsVenta.recordset[0],
-      cliente: `${rsVenta.recordset[0].apellido}, ${rsVenta.recordset[0].nombre}`,
+      ...rsVenta[0],
+      cliente: `${rsVenta[0].apellido || ""}${rsVenta[0].apellido ? ", " : ""}${
+        rsVenta[0].nombre || ""
+      }`,
     };
 
     // Items
-    let items = [];
-    if (await hasTable(pool, "dbo.VentaItems")) {
-      const cols = await resolveItemColumns(pool, "dbo.VentaItems");
-      const rsItems = await pool.request().input("ventaId", sql.Int, ventaId)
-        .query(`
-          SELECT i.id, i.${cols.productoIdCol} AS productoId,
-                 p.nombre AS producto, i.${cols.cantidadCol} AS cantidad,
-                 ${cols.pUnitExpr} AS precioUnit,
-                 ${cols.subTotalExpr} AS subTotal
-          FROM dbo.VentaItems i
-          LEFT JOIN dbo.Productos p ON p.id = i.${cols.productoIdCol}
-          WHERE i.${cols.ventaIdCol} = @ventaId
-        `);
-      items = rsItems.recordset.map((r) => ({
-        id: r.id,
-        productoId: r.productoId,
-        producto: r.producto,
-        cantidad: Number(r.cantidad || 0),
-        precioUnit: r.precioUnit != null ? Number(r.precioUnit) : 0,
-        subTotal: r.subTotal != null ? Number(r.subTotal) : 0,
-      }));
-    }
+    const { rows: rsItems } = await pool.query(
+      `
+      SELECT i.id, i.productoid AS "productoId",
+             p.nombre AS producto, i.cantidad,
+             i.preciounit AS "precioUnit",
+             (i.preciounit * i.cantidad) AS "subTotal"
+      FROM ventaitems i
+      LEFT JOIN productos p ON p.id = i.productoid
+      WHERE i.ventaid = $1
+      `,
+      [ventaId]
+    );
+    const items = rsItems.map((r) => ({
+      id: r.id,
+      productoId: r.productoId,
+      producto: r.producto,
+      cantidad: Number(r.cantidad || 0),
+      precioUnit: r.precioUnit != null ? Number(r.precioUnit) : 0,
+      subTotal: r.subTotal != null ? Number(r.subTotal) : 0,
+    }));
 
-    // Cuotas + pagos
-    let cuotas = [];
-    let pagos = [];
-    if (await hasTable(pool, "dbo.Cuotas")) {
-      const rsC = await pool.request().input("ventaId", sql.Int, ventaId)
-        .query(`
-          SELECT id, nro,
-                 CONVERT(varchar(10), venceEl, 23) + 'T12:00:00' AS venceEl,
-                 monto, pagado, saldo
-          FROM dbo.Cuotas
-          WHERE ventaId = @ventaId
-          ORDER BY nro
-        `);
-      cuotas = rsC.recordset.map((r) => ({
-        id: r.id,
-        nro: r.nro,
-        venceEl: r.venceEl,
-        monto: Number(r.monto || 0),
-        pagado: Number(r.pagado || 0),
-        saldo: Number(r.saldo || 0),
-        pagos: [],
-      }));
+    // Cuotas
+    const { rows: rsCuotas } = await pool.query(
+      `
+      SELECT id, nro,
+             TO_CHAR(venceel, 'YYYY-MM-DD') || 'T12:00:00' AS "venceEl",
+             monto, pagado, saldo
+      FROM cuotas
+      WHERE ventaid = $1
+      ORDER BY nro
+      `,
+      [ventaId]
+    );
+    let cuotas = rsCuotas.map((r) => ({
+      id: r.id,
+      nro: r.nro,
+      venceEl: r.venceEl,
+      monto: Number(r.monto || 0),
+      pagado: Number(r.pagado || 0),
+      saldo: Number(r.saldo || 0),
+      pagos: [],
+    }));
 
-      if (await hasTable(pool, "dbo.Pagos")) {
-        // === CAMBIO === normalizamos fecha a YYYY-MM-DDT12:00:00 (solo fecha)
-        const rsP = await pool.request().input("ventaId", sql.Int, ventaId)
-          .query(`
-            SELECT id, cuotaId,
-                   CONVERT(varchar(10), CAST(fecha AS DATE), 23) + 'T12:00:00' AS fecha,
-                   monto
-            FROM dbo.Pagos
-            WHERE ventaId = @ventaId
-            ORDER BY fecha ASC, id ASC
-          `);
-        const byCuota = {};
-        pagos = rsP.recordset.map((row) => {
-          const p = {
-            id: row.id,
-            cuotaId: row.cuotaId,
-            fecha: row.fecha,
-            monto: Number(row.monto || 0),
-          };
-          if (row.cuotaId)
-            (byCuota[row.cuotaId] ||= []).push({
-              fecha: p.fecha,
-              monto: p.monto,
-            });
-          return p;
-        });
-        cuotas = cuotas.map((c) => ({ ...c, pagos: byCuota[c.id] || [] }));
-      }
-    }
+    // Pagos
+    const { rows: rsPagos } = await pool.query(
+      `
+      SELECT id, cuotaid AS "cuotaId",
+             TO_CHAR(fecha::date, 'YYYY-MM-DD') || 'T12:00:00' AS fecha,
+             monto
+      FROM pagos
+      WHERE ventaid = $1
+      ORDER BY fecha ASC, id ASC
+      `,
+      [ventaId]
+    );
+    const byCuota = {};
+    const pagos = rsPagos.map((row) => {
+      const p = {
+        id: row.id,
+        cuotaId: row.cuotaId,
+        fecha: row.fecha,
+        monto: Number(row.monto || 0),
+      };
+      if (row.cuotaId)
+        (byCuota[row.cuotaId] ||= []).push({ fecha: p.fecha, monto: p.monto });
+      return p;
+    });
+    cuotas = cuotas.map((c) => ({ ...c, pagos: byCuota[c.id] || [] }));
 
     res.json({ venta, items, cuotas, pagos });
   } catch (err) {
-    console.error("GET /api/ventas/:id", err.message);
+    console.error("GET /api/ventas/:id", err);
     res.status(500).json({ error: "Error obteniendo detalle de venta" });
   }
 });
@@ -548,13 +606,11 @@ app.get("/api/venta/:id", (req, res, next) => {
 // Crear venta
 app.post("/api/ventas", async (req, res) => {
   const body = req.body || {};
+  const client = await pool.connect();
   try {
-    // fecha local en 'YYYY-MM-DD' (sin parsear YYYY-MM-DD)
     const fecha = ymdLocal(body.fecha);
-
     const clienteId = Number(body.clienteId);
     const tipoPago = String(body.tipoPago || "Contado");
-    // Normalización: si es CONTADO, ignoramos cuotas e interés
     const interes = tipoPago === "Contado" ? 0 : Number(body.interes || 0);
     const items = Array.isArray(body.items) ? body.items : [];
     const cuotas =
@@ -564,147 +620,110 @@ app.post("/api/ventas", async (req, res) => {
         ? body.cuotas
         : [];
 
-    if (!(clienteId > 0) || !items.length) {
+    if (!(clienteId > 0) || !items.length)
       return res
         .status(400)
         .json({ error: "Cliente e items son obligatorios" });
-    }
-    if (!["Contado", "Credito"].includes(tipoPago)) {
+    if (!["Contado", "Credito"].includes(tipoPago))
       return res.status(400).json({ error: "Tipo de pago inválido" });
-    }
-    if (tipoPago === "Credito" && !cuotas.length) {
+    if (tipoPago === "Credito" && !cuotas.length)
       return res
         .status(400)
         .json({ error: "Faltan cuotas para venta a crédito" });
-    }
 
-    const pool = await sql.connect(dbConfig);
-    const tx = new sql.Transaction(pool);
-    await tx.begin();
+    await client.query("BEGIN");
 
-    try {
-      const treq = new sql.Request(tx);
+    // Cabecera
+    const rsVenta = await client.query(
+      `INSERT INTO ventas (fecha, clienteid, tipopago, total, saldo, interes)
+       VALUES (CAST($1 AS DATE), $2, $3, 0, 0, $4)
+       RETURNING id`,
+      [fecha, clienteId, tipoPago, interes]
+    );
+    const ventaId = rsVenta.rows[0].id;
 
-      // Cabecera (inicial en 0) - FECHA COMO TEXTO + CAST
-      const rsVenta = await treq
-        .input("fecha", sql.VarChar, fecha) // 'YYYY-MM-DD'
-        .input("clienteId", sql.Int, clienteId)
-        .input("tipoPago", sql.NVarChar, tipoPago)
-        .input("interes", sql.Decimal(5, 2), interes).query(`
-          INSERT INTO dbo.Ventas (fecha, clienteId, tipoPago, total, saldo, interes)
-          OUTPUT INSERTED.id
-          VALUES (CAST(@fecha AS DATE), @clienteId, @tipoPago, 0, 0, @interes)
-        `);
-      const ventaId = rsVenta.recordset[0].id;
+    // Items + stock
+    let totalItems = 0;
+    for (const it of items) {
+      const productoId = Number(it.productoId);
+      const cantidad = Number(it.cantidad || 0);
+      const precioUnit = Number(it.precioUnit || 0);
+      if (!(productoId > 0) || !(cantidad > 0) || precioUnit < 0)
+        throw new Error("Item inválido");
 
-      // Items + stock
-      let totalItems = 0;
-      for (const it of items) {
-        const productoId = Number(it.productoId);
-        const cantidad = Number(it.cantidad || 0);
-        const precioUnit = Number(it.precioUnit || 0);
-        if (!(productoId > 0) || !(cantidad > 0) || precioUnit < 0) {
-          throw new Error("Item inválido");
-        }
-
-        // Stock
-        const rsStock = await new sql.Request(tx)
-          .input("pid", sql.Int, productoId)
-          .query(`SELECT cantidad FROM dbo.Productos WHERE id=@pid`);
-        const stock = Number(rsStock.recordset?.[0]?.cantidad ?? 0);
-        if (stock < cantidad) {
-          throw new Error(
-            `Stock insuficiente para producto ${productoId} (stock ${stock}, solicitado ${cantidad})`
-          );
-        }
-
-        // Insert item
-        await new sql.Request(tx)
-          .input("ventaId", sql.Int, ventaId)
-          .input("productoId", sql.Int, productoId)
-          .input("cantidad", sql.Int, cantidad)
-          .input("precioUnit", sql.Decimal(12, 2), precioUnit).query(`
-            INSERT INTO dbo.VentaItems (ventaId, productoId, cantidad, precioUnit)
-            VALUES (@ventaId, @productoId, @cantidad, @precioUnit)
-          `);
-
-        // Descontar stock
-        await new sql.Request(tx)
-          .input("pid", sql.Int, productoId)
-          .input("cant", sql.Int, cantidad)
-          .query(
-            `UPDATE dbo.Productos SET cantidad = cantidad - @cant WHERE id=@pid`
-          );
-
-        totalItems += cantidad * precioUnit;
-      }
-
-      // Total/saldo
-      let total = +totalItems.toFixed(2);
-      let saldo = 0;
-
-      if (tipoPago === "Credito") {
-        const totalConInteres = +(
-          totalItems +
-          (totalItems * interes) / 100
-        ).toFixed(2);
-        total = totalConInteres;
-        saldo = totalConInteres;
-
-        // Cuotas
-        for (const c of cuotas) {
-          const nro = Number(c.nro || 0);
-          const venceEl = ymdLocal(c.venceEl); // 'YYYY-MM-DD'
-          const monto = Number(c.monto || 0);
-          if (!(nro > 0) || !(monto >= 0) || !venceEl) {
-            throw new Error("Cuota inválida");
-          }
-          await new sql.Request(tx)
-            .input("ventaId", sql.Int, ventaId)
-            .input("nro", sql.Int, nro)
-            .input("venceEl", sql.VarChar, venceEl) // texto
-            .input("monto", sql.Decimal(12, 2), monto)
-            .input("pagado", sql.Decimal(12, 2), 0)
-            .input("saldo", sql.Decimal(12, 2), monto).query(`
-              INSERT INTO dbo.Cuotas (ventaId, nro, venceEl, monto, pagado, saldo)
-              VALUES (@ventaId, @nro, CAST(@venceEl AS DATE), @monto, @pagado, @saldo)
-            `);
-        }
-      } else {
-        // === CONTADO ===
-        saldo = 0;
-
-        // Pago automático por el total de la venta, usando la fecha local de la venta.
-        const fechaPago = dateFromLocalYMD(fecha);
-        await new sql.Request(tx)
-          .input("ventaId", sql.Int, ventaId)
-          .input("cuotaId", sql.Int, null)
-          .input("fecha", sql.DateTime2, fechaPago)
-          .input("monto", sql.Decimal(12, 2), total).query(`
-            INSERT INTO dbo.Pagos (ventaId, cuotaId, fecha, monto)
-            VALUES (@ventaId, @cuotaId, @fecha, @monto)
-          `);
-      }
-
-      // Actualizar cabecera
-      await new sql.Request(tx)
-        .input("ventaId", sql.Int, ventaId)
-        .input("total", sql.Decimal(12, 2), total)
-        .input("saldo", sql.Decimal(12, 2), saldo)
-        .query(
-          `UPDATE dbo.Ventas SET total=@total, saldo=@saldo WHERE id=@ventaId`
+      const rsStock = await client.query(
+        `SELECT cantidad FROM productos WHERE id=$1`,
+        [productoId]
+      );
+      const stock = Number(rsStock.rows?.[0]?.cantidad ?? 0);
+      if (stock < cantidad)
+        throw new Error(
+          `Stock insuficiente para producto ${productoId} (stock ${stock}, solicitado ${cantidad})`
         );
 
-      await tx.commit();
-      res.json({ ok: true, ventaId });
-    } catch (e) {
-      await tx.rollback();
-      console.error("POST /api/ventas tx", e.message);
-      res.status(400).json({ error: e.message || "No se pudo crear la venta" });
+      await client.query(
+        `INSERT INTO ventaitems (ventaid, productoid, cantidad, preciounit)
+         VALUES ($1,$2,$3,$4)`,
+        [ventaId, productoId, cantidad, precioUnit]
+      );
+
+      await client.query(
+        `UPDATE productos SET cantidad = cantidad - $1 WHERE id=$2`,
+        [cantidad, productoId]
+      );
+
+      totalItems += cantidad * precioUnit;
     }
-  } catch (err) {
-    console.error("POST /api/ventas", err.message);
-    res.status(500).json({ error: "Error creando venta" });
+
+    // Total/saldo
+    let total = +totalItems.toFixed(2);
+    let saldo = 0;
+
+    if (tipoPago === "Credito") {
+      const totalConInteres = +(
+        totalItems +
+        (totalItems * interes) / 100
+      ).toFixed(2);
+      total = totalConInteres;
+      saldo = totalConInteres;
+
+      for (const c of cuotas) {
+        const nro = Number(c.nro || 0);
+        const venceEl = ymdLocal(c.venceEl);
+        const monto = Number(c.monto || 0);
+        if (!(nro > 0) || !(monto >= 0) || !venceEl)
+          throw new Error("Cuota inválida");
+        await client.query(
+          `INSERT INTO cuotas (ventaid, nro, venceel, monto, pagado, saldo)
+           VALUES ($1,$2,CAST($3 AS DATE),$4,0,$4)`,
+          [ventaId, nro, venceEl, monto]
+        );
+      }
+    } else {
+      // Contado: crear pago automático por total, a las 12:00 de la fecha
+      const fechaPago = dateFromLocalYMD(fecha);
+      await client.query(
+        `INSERT INTO pagos (ventaid, cuotaid, fecha, monto)
+         VALUES ($1, NULL, $2, $3)`,
+        [ventaId, fechaPago, total]
+      );
+    }
+
+    // Actualizar cabecera
+    await client.query(`UPDATE ventas SET total=$1, saldo=$2 WHERE id=$3`, [
+      total,
+      saldo,
+      ventaId,
+    ]);
+
+    await client.query("COMMIT");
+    res.json({ ok: true, ventaId });
+  } catch (e) {
+    await client.query("ROLLBACK");
+    console.error("POST /api/ventas", e);
+    res.status(400).json({ error: e.message || "No se pudo crear la venta" });
+  } finally {
+    client.release();
   }
 });
 
@@ -712,100 +731,75 @@ app.post("/api/ventas", async (req, res) => {
 app.post("/api/ventas/:id/pagos", async (req, res) => {
   const ventaId = Number(req.params.id);
   const body = req.body || {};
+  const client = await pool.connect();
   try {
     const monto = Number(body.monto || 0);
-    // === CAMBIO === parseo seguro de la fecha (acepta 'YYYY-MM-DD' o ISO)
     const fecha = dateFromLocalYMD(body.fecha);
-    if (!(ventaId > 0) || !(monto > 0)) {
+    if (!(ventaId > 0) || !(monto > 0))
       return res.status(400).json({ error: "Monto inválido" });
-    }
 
-    const pool = await sql.connect(dbConfig);
-    const tx = new sql.Transaction(pool);
-    await tx.begin();
-    try {
-      const treq = new sql.Request(tx);
+    await client.query("BEGIN");
 
-      // Venta (leemos saldo actual)
-      const rsV = await treq.input("ventaId", sql.Int, ventaId).query(`
-        SELECT id, tipoPago, saldo FROM dbo.Ventas WHERE id=@ventaId
-      `);
-      if (!rsV.recordset.length) throw new Error("Venta no encontrada");
-      const venta = rsV.recordset[0];
+    const rsV = await client.query(
+      `SELECT id, tipopago, saldo FROM ventas WHERE id=$1`,
+      [ventaId]
+    );
+    if (!rsV.rows.length) throw new Error("Venta no encontrada");
+    const venta = rsV.rows[0];
 
-      // === CAMBIO === reglas
-      if (venta.tipoPago === "Contado") {
-        throw new Error(
-          "La venta es 'Contado' y ya está paga; no admite pagos."
-        );
-      }
-      if (monto > Number(venta.saldo || 0)) {
-        throw new Error(
-          `El monto supera el saldo ($ ${Number(venta.saldo || 0).toFixed(2)})`
-        );
-      }
-
-      let restante = monto;
-      const pagosCreados = [];
-
-      // Crédito: distribuir en cuotas abiertas
-      const rsC = await new sql.Request(tx).input("ventaId", sql.Int, ventaId)
-        .query(`
-          SELECT id, nro, saldo
-          FROM dbo.Cuotas
-          WHERE ventaId = @ventaId AND saldo > 0
-          ORDER BY nro ASC
-        `);
-      const cuotas = rsC.recordset;
-
-      for (const c of cuotas) {
-        if (restante <= 0) break;
-        const aplica = Math.min(Number(c.saldo || 0), restante);
-
-        await new sql.Request(tx)
-          .input("ventaId", sql.Int, ventaId)
-          .input("cuotaId", sql.Int, c.id)
-          .input("fecha", sql.DateTime2, fecha)
-          .input("monto", sql.Decimal(12, 2), aplica).query(`
-            INSERT INTO dbo.Pagos (ventaId, cuotaId, fecha, monto)
-            VALUES (@ventaId, @cuotaId, @fecha, @monto)
-          `);
-        pagosCreados.push({ cuotaId: c.id, monto: aplica });
-
-        await new sql.Request(tx)
-          .input("id", sql.Int, c.id)
-          .input("aplica", sql.Decimal(12, 2), aplica).query(`
-            UPDATE dbo.Cuotas
-            SET pagado = pagado + @aplica,
-                saldo  = saldo  - @aplica
-            WHERE id = @id
-          `);
-
-        restante = +(restante - aplica).toFixed(2);
-      }
-
-      // Actualizar saldo de la venta (ya validado que monto <= saldo)
-      const nuevoSaldo = Math.max(
-        0,
-        +(Number(venta.saldo || 0) - monto).toFixed(2)
+    if (venta.tipopago === "Contado")
+      throw new Error("La venta es 'Contado' y ya está paga; no admite pagos.");
+    if (monto > Number(venta.saldo || 0))
+      throw new Error(
+        `El monto supera el saldo ($ ${Number(venta.saldo || 0).toFixed(2)})`
       );
-      await new sql.Request(tx)
-        .input("ventaId", sql.Int, ventaId)
-        .input("saldo", sql.Decimal(12, 2), nuevoSaldo)
-        .query(`UPDATE dbo.Ventas SET saldo=@saldo WHERE id=@ventaId`);
 
-      await tx.commit();
-      res.json({ ok: true, pagos: pagosCreados, nuevoSaldo });
-    } catch (e) {
-      await tx.rollback();
-      console.error("POST /api/ventas/:id/pagos tx", e.message);
-      res
-        .status(400)
-        .json({ error: e.message || "No se pudo registrar el pago" });
+    let restante = monto;
+    const pagosCreados = [];
+
+    const rsC = await client.query(
+      `SELECT id, nro, saldo FROM cuotas WHERE ventaid=$1 AND saldo > 0 ORDER BY nro ASC`,
+      [ventaId]
+    );
+    const cuotas = rsC.rows;
+
+    for (const c of cuotas) {
+      if (restante <= 0) break;
+      const aplica = Math.min(Number(c.saldo || 0), restante);
+
+      await client.query(
+        `INSERT INTO pagos (ventaid, cuotaid, fecha, monto) VALUES ($1,$2,$3,$4)`,
+        [ventaId, c.id, fecha, aplica]
+      );
+      pagosCreados.push({ cuotaId: c.id, monto: aplica });
+
+      await client.query(
+        `UPDATE cuotas SET pagado = pagado + $1, saldo = saldo - $1 WHERE id=$2`,
+        [aplica, c.id]
+      );
+
+      restante = +(restante - aplica).toFixed(2);
     }
-  } catch (err) {
-    console.error("POST /api/ventas/:id/pagos", err.message);
-    res.status(500).json({ error: "Error registrando pago" });
+
+    const nuevoSaldo = Math.max(
+      0,
+      +(Number(venta.saldo || 0) - monto).toFixed(2)
+    );
+    await client.query(`UPDATE ventas SET saldo=$1 WHERE id=$2`, [
+      nuevoSaldo,
+      ventaId,
+    ]);
+
+    await client.query("COMMIT");
+    res.json({ ok: true, pagos: pagosCreados, nuevoSaldo });
+  } catch (e) {
+    await client.query("ROLLBACK");
+    console.error("POST /api/ventas/:id/pagos", e);
+    res
+      .status(400)
+      .json({ error: e.message || "No se pudo registrar el pago" });
+  } finally {
+    client.release();
   }
 });
 
@@ -813,23 +807,26 @@ app.post("/api/ventas/:id/pagos", async (req, res) => {
 app.get("/api/dashboard/expiries", async (req, res) => {
   try {
     const days = Math.max(1, Number(req.query.days || 60));
-    const pool = await sql.connect(dbConfig);
-    const r = await pool.request().input("days", sql.Int, days).query(`
-      SELECT TOP 100
+    const { rows } = await pool.query(
+      `
+      SELECT
         p.nombre, p.detalle, p.precio,
         CASE WHEN p.vencimiento IS NULL
           THEN NULL
-          ELSE CONVERT(varchar(10), p.vencimiento, 23) + 'T12:00:00'
+          ELSE TO_CHAR(p.vencimiento, 'YYYY-MM-DD') || 'T12:00:00'
         END AS vencimiento,
         p.cantidad
-      FROM dbo.Productos p
+      FROM productos p
       WHERE p.vencimiento IS NOT NULL
-        AND p.vencimiento BETWEEN CAST(GETDATE() AS DATE) AND DATEADD(DAY, @days, CAST(GETDATE() AS DATE))
+        AND p.vencimiento BETWEEN CURRENT_DATE AND (CURRENT_DATE + $1::int)
       ORDER BY p.vencimiento ASC, p.nombre
-    `);
-    res.json(r.recordset || []);
+      LIMIT 100
+      `,
+      [days]
+    );
+    res.json(rows || []);
   } catch (e) {
-    console.error("GET /api/dashboard/expiries", e.message);
+    console.error("GET /api/dashboard/expiries", e);
     res.json([]);
   }
 });
@@ -837,49 +834,31 @@ app.get("/api/dashboard/expiries", async (req, res) => {
 app.get("/api/dashboard/dues", async (req, res) => {
   try {
     const days = Math.max(1, Number(req.query.days || 7));
-    const pool = await sql.connect(dbConfig);
-    const r = await pool.request().input("days", sql.Int, days).query(`
-      SELECT TOP 200
-        (c.apellido + ', ' + c.nombre) AS cliente,
+    const { rows } = await pool.query(
+      `
+      SELECT
+        (COALESCE(c.apellido,'') || CASE WHEN c.apellido IS NULL THEN '' ELSE ', ' END || COALESCE(c.nombre,'')) AS cliente,
         q.nro,
-        CONVERT(varchar(10), q.venceEl, 23) + 'T12:00:00' AS vencimiento,
+        TO_CHAR(q.venceel, 'YYYY-MM-DD') || 'T12:00:00' AS vencimiento,
         q.monto
-      FROM dbo.Cuotas q
-      JOIN dbo.Ventas v  ON v.id = q.ventaId
-      JOIN dbo.Clientes c ON c.id = v.clienteId
-      WHERE q.venceEl BETWEEN CAST(GETDATE() AS DATE) AND DATEADD(DAY, @days, CAST(GETDATE() AS DATE))
-      ORDER BY q.venceEl ASC, q.nro ASC
-    `);
-    res.json(r.recordset || []);
+      FROM cuotas q
+      JOIN ventas v  ON v.id = q.ventaid
+      JOIN clientes c ON c.id = v.clienteid
+      WHERE q.venceel BETWEEN CURRENT_DATE AND (CURRENT_DATE + $1::int)
+      ORDER BY q.venceel ASC, q.nro ASC
+      LIMIT 200
+      `,
+      [days]
+    );
+    res.json(rows || []);
   } catch (e) {
-    console.error("GET /api/dashboard/dues", e.message);
+    console.error("GET /api/dashboard/dues", e);
     res.json([]);
-  }
-});
-
-// ---- DEBUG SCHEMA ----
-app.get("/api/_debug/schema", async (_req, res) => {
-  try {
-    const pool = await sql.connect(dbConfig);
-    const checks = {};
-    for (const t of [
-      "dbo.Productos",
-      "dbo.Clientes",
-      "dbo.Ventas",
-      "dbo.Cuotas",
-      "dbo.Pagos",
-      "dbo.VentaItems",
-    ]) {
-      checks[t.split(".").pop()] = { table: t, ok: await hasTable(pool, t) };
-    }
-    const itemsTable = "dbo.VentaItems";
-    const cols = await resolveItemColumns(pool, itemsTable);
-    res.json({ ...checks, itemsTable, itemsColumns: cols });
-  } catch (err) {
-    res.status(500).json({ error: "Error en schema" });
   }
 });
 
 // ---- START ----
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("Servidor escuchando en puerto " + PORT));
+app.listen(PORT, () =>
+  console.log("Servidor (Postgres) escuchando en puerto " + PORT)
+);
