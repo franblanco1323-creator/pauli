@@ -1,3 +1,4 @@
+<!DOCTYPE html>
 <html lang="es">
   <head>
     <meta charset="utf-8" />
@@ -9,7 +10,6 @@
     <title>Ventas</title>
     <link rel="stylesheet" href="styles.css" />
     <style>
-      /* ayuditas visuales */
       .note {
         font-size: 12px;
         opacity: 0.8;
@@ -39,22 +39,16 @@
     </style>
   </head>
   <body>
-    <!-- Topbar con menú hamburguesa -->
+    <!-- Topbar -->
     <header class="topbar">
-      <button
-        class="hamburger"
-        aria-label="Abrir menú"
-        onclick="document.body.classList.toggle('menu-open')"
-      >
-        ☰
-      </button>
-      <div class="brand">Natura <span>Pauli</span></div>
+      <button id="btnMenu" class="hamburger" aria-label="Abrir menú">☰</button>
+      <div class="brand">Natura <span>Graciela</span></div>
     </header>
 
-    <!-- Sidebar: desktop fijo / mobile off-canvas -->
+    <!-- Sidebar -->
     <nav id="sidebar" class="sidebar" aria-hidden="true">
       <h1 style="margin: 0 0 8px 0; font-size: 20px; line-height: 1.1">
-        Natura<br />Pauli
+        Natura<br />Graciela
       </h1>
       <a href="index.html">Home</a>
       <a href="productos.html">Productos</a>
@@ -62,7 +56,6 @@
       <a class="active" href="ventas.html">Ventas</a>
     </nav>
 
-    <!-- Fondo para cerrar el menú en mobile -->
     <div class="backdrop" id="backdrop"></div>
 
     <main class="content">
@@ -114,10 +107,10 @@
             <label>Fecha <input type="date" name="fecha" /></label>
             <label
               >Cliente
-              <select name="clienteId" required></select
-            ></label>
-            <label>
-              Tipo de pago
+              <select name="clienteId" required></select>
+            </label>
+            <label
+              >Tipo de pago
               <select name="tipoPago" required>
                 <option value="Contado">Contado</option>
                 <option value="Credito">Crédito</option>
@@ -151,6 +144,7 @@
             </table>
           </div>
 
+          <!-- Bloque Crédito -->
           <div id="boxCredito" style="display: none; margin-top: 16px">
             <h4>Crédito</h4>
             <div
@@ -168,7 +162,19 @@
                   min="0"
                   step="0.01"
                   value="0"
-              /></label>
+                />
+              </label>
+              <label
+                >Entrega (anticipo)
+                <input
+                  id="entrega"
+                  name="entrega"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value="0"
+                />
+              </label>
               <label
                 >Cuotas (cantidad)
                 <input
@@ -176,11 +182,13 @@
                   name="cantidadCuotas"
                   min="1"
                   step="1"
-                  value="3"
-              /></label>
+                  value="1"
+                />
+              </label>
               <label
-                >1º vencimiento <input type="date" name="primerVencimiento"
-              /></label>
+                >1º vencimiento
+                <input type="date" name="primerVencimiento" />
+              </label>
               <div style="display: flex; align-items: flex-end">
                 <button type="button" id="btnGenerarCuotas">
                   Generar cuotas
@@ -311,9 +319,12 @@
           >
             <label
               >Monto
-              <input type="number" name="monto" min="0" step="0.01" required
-            /></label>
-            <label>Fecha <input type="date" name="fecha" /></label>
+              <input type="number" name="monto" min="0" step="0.01" required />
+            </label>
+            <label
+              >Fecha
+              <input type="date" name="fecha" />
+            </label>
           </div>
           <div style="margin-top: 12px; display: flex; gap: 8px">
             <button type="submit">Aplicar</button>
@@ -325,7 +336,7 @@
 
     <script src="ventas.js"></script>
 
-    <!-- JS para abrir/cerrar el menú hamburguesa -->
+    <!-- JS del menú (sin inline) -->
     <script>
       (function () {
         const btn = document.getElementById("btnMenu");
