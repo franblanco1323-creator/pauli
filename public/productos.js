@@ -61,7 +61,7 @@ function renderTable() {
   ui.tbody.innerHTML = "";
   for (const row of state.rows) {
     const tr = document.createElement("tr");
-    tr.append(cell(row.id));
+    //tr.append(cell(row.id));
     tr.append(cell(row.nombre));
     tr.append(cell(row.detalle || ""));
     tr.append(cell(row.marca || ""));
