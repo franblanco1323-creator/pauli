@@ -84,7 +84,6 @@ function formatDate(v) {
   const m = String(v).match(/^(\d{4})-(\d{2})-(\d{2})/);
   return m ? `${m[3]}/${m[2]}/${m[1]}` : String(v);
 }
-// === NUEVO === mostrar botón solo si es crédito y hay saldo
 function puedeRegistrarPago(v) {
   return String(v.tipoPago) === "Credito" && Number(v.saldo) > 0;
 }
@@ -126,7 +125,6 @@ function renderListado() {
     tr.append(cell(money(v.saldo)));
     tr.append(cell(`${Number(v.interes || 0).toFixed(2)}%`));
 
-    // === MODIFICADO: acciones condicionadas
     const acc = document.createElement("td");
     acc.style.whiteSpace = "nowrap";
     const bDet = btn("Detalle", "btn btn-sm", () => openDetalle(v.id));
@@ -170,6 +168,7 @@ function openNueva() {
 
   // fecha hoy
   ui.frmVenta.fecha.value = toInputDate(new Date());
+
   // clientes
   const sel = ui.frmVenta.clienteId;
   sel.innerHTML =
@@ -183,14 +182,18 @@ function openNueva() {
       )
       .join("");
 
+  // escuchar “Entrega”
+  ui.frmVenta?.entrega?.addEventListener("input", recalcItems);
+  ui.frmVenta.entrega && (ui.frmVenta.entrega.value = 0);
+
   // tipo pago
   ui.frmVenta.tipoPago.value = "Contado";
   ui.boxCredito.style.display = "none";
   ui.frmVenta.interes.value = 0;
-  ui.frmVenta.cantidadCuotas.value = 3;
+  ui.frmVenta.cantidadCuotas.value = 1;
   ui.frmVenta.primerVencimiento.value = toInputDate(new Date());
 
-  addItemRow(); // 1 fila por defecto
+  addItemRow(); // 1 fila
   recalcItems();
 
   ui.boxNueva.style.display = "block";
@@ -218,7 +221,9 @@ function addItemRow() {
         (p) =>
           `<option value="${p.id}" data-precio="${p.precio}" data-stock="${
             p.cantidad || 0
-          }">${p.nombre} (${p.marca})</option>`
+          }">
+            ${p.nombre} (${p.marca || ""})
+          </option>`
       )
       .join("");
 
@@ -227,33 +232,15 @@ function addItemRow() {
   stockNote.className = "note";
   stockNote.textContent = "";
 
-  sel.onchange = () => {
-    const opt = sel.options[sel.selectedIndex];
-    const precioSugerido = Number(opt?.dataset?.precio || 0);
-    const stock = Number(opt?.dataset?.stock || 0);
+  // mini-ficha
+  const detailNote = document.createElement("div");
+  detailNote.className = "note";
+  detailNote.style.opacity = "0.9";
+  detailNote.style.fontSize = "12px";
+  detailNote.style.marginTop = "4px";
+  detailNote.textContent = "";
 
-    if (!isNaN(precioSugerido) && precioSugerido > 0) {
-      inpPrecio.value = precioSugerido.toFixed(2);
-    }
-
-    // stock visible
-    if (stock <= 0) {
-      stockNote.textContent = "SIN STOCK";
-      stockNote.classList.remove("good");
-      stockNote.classList.add("bad");
-    } else {
-      stockNote.textContent = `Stock: ${stock}`;
-      stockNote.classList.remove("bad");
-      stockNote.classList.add("good");
-    }
-
-    // si cantidad supera stock, marca error
-    validateQtyVsStock();
-    syncRow();
-    recalcItems();
-  };
-
-  tdProd.append(sel, stockNote);
+  tdProd.append(sel, stockNote, detailNote);
 
   const tdCant = document.createElement("td");
   const inpCant = document.createElement("input");
@@ -310,9 +297,7 @@ function addItemRow() {
       }
     } else {
       inpCant.classList.remove("input-bad");
-      // restaura texto base (SIN STOCK / Stock: N)
-      const opt = sel.options[sel.selectedIndex];
-      const st = Number(opt?.dataset?.stock || 0);
+      const st = currentStock();
       if (st <= 0) {
         stockNote.textContent = "SIN STOCK";
         stockNote.classList.add("bad");
@@ -323,7 +308,6 @@ function addItemRow() {
       }
     }
   }
-
   function syncRow() {
     const productoId = Number(sel.value) || null;
     const cantidad = Number(inpCant.value) || 0;
@@ -337,7 +321,48 @@ function addItemRow() {
     else state.itemsForm[idx] = row;
   }
 
-  // init state row
+  // onchange único: precio + stock + detalle
+  sel.onchange = () => {
+    const opt = sel.options[sel.selectedIndex];
+    const precioSugerido = Number(opt?.dataset?.precio || 0);
+    const stock = Number(opt?.dataset?.stock || 0);
+
+    if (!isNaN(precioSugerido) && precioSugerido > 0) {
+      inpPrecio.value = precioSugerido.toFixed(2);
+    }
+
+    if (stock <= 0) {
+      stockNote.textContent = "SIN STOCK";
+      stockNote.classList.remove("good");
+      stockNote.classList.add("bad");
+      stockNote.style.color = "#b71c1c";
+    } else {
+      stockNote.textContent = `Stock: ${stock}`;
+      stockNote.classList.remove("bad");
+      stockNote.classList.add("good");
+      stockNote.style.color = "#1b5e20";
+    }
+
+    // detalle
+    const pid = Number(sel.value);
+    const p = state.productos.find((x) => x.id === pid);
+    if (p) {
+      const venceTxt = p.vencimiento
+        ? ` • Vence: ${formatDate(p.vencimiento)}`
+        : "";
+      detailNote.innerHTML = `<strong>${p.marca || "-"}</strong> — ${
+        p.detalle || "Sin detalle"
+      }${venceTxt} • Precio sug.: ${money(p.precio)}`;
+    } else {
+      detailNote.textContent = "";
+    }
+
+    validateQtyVsStock();
+    syncRow();
+    recalcItems();
+  };
+
+  // init
   sel.dispatchEvent(new Event("change"));
   inpCant.dispatchEvent(new Event("input"));
 }
@@ -348,6 +373,7 @@ function renumerarItems() {
   );
 }
 
+// ==================== Totales y cuotas ====================
 function recalcItems() {
   const totalItems = sum(
     state.itemsForm,
@@ -357,10 +383,22 @@ function recalcItems() {
 
   const tipo = ui.frmVenta.tipoPago.value;
   const interesPct = Number(ui.frmVenta.interes.value || 0);
+  const entrega = Number(ui.frmVenta.entrega?.value || 0);
+
+  // lo que se financia
+  const montoBase = Math.max(totalItems - entrega, 0);
+
   if (tipo === "Credito") {
-    const tci = +(totalItems + (totalItems * interesPct) / 100).toFixed(2);
-    ui.sumInteres.textContent = `Interés: ${interesPct.toFixed(2)}%`;
-    ui.sumTotalConInteres.textContent = `Total con interés: ${money(tci)}`;
+    const totalConInteres = +(
+      montoBase +
+      (montoBase * interesPct) / 100
+    ).toFixed(2);
+    ui.sumInteres.textContent = `Interés: ${interesPct.toFixed(
+      2
+    )}% • Entrega: ${money(entrega)}`;
+    ui.sumTotalConInteres.textContent = `A financiar: ${money(
+      montoBase
+    )} • Total con interés: ${money(totalConInteres)}`;
 
     const totalCuotas = sum(state.cuotasForm, (c) => c.monto || 0);
     ui.sumCuotas.textContent = money(totalCuotas);
@@ -378,29 +416,30 @@ ui.frmVenta?.tipoPago?.addEventListener("change", () => {
   recalcItems();
 });
 
-// generar cuotas
+// generar cuotas (usa total a financiar = totalItems - entrega)
 ui.btnGenerarCuotas?.addEventListener("click", () => {
   const n = Math.max(1, Number(ui.frmVenta.cantidadCuotas.value || 1));
   const interes = Number(ui.frmVenta.interes.value || 0);
+
   const totalItems = sum(
     state.itemsForm,
     (r) => (r.cantidad || 0) * (r.precioUnit || 0)
   );
-  const totalConInteres = +(totalItems + (totalItems * interes) / 100).toFixed(
-    2
-  );
+  const entrega = Number(ui.frmVenta.entrega?.value || 0);
+  const montoBase = Math.max(totalItems - entrega, 0);
+  const totalConInteres = +(montoBase + (montoBase * interes) / 100).toFixed(2);
 
   let primerVto =
     ui.frmVenta.primerVencimiento.value || toInputDate(new Date());
-  const base = +(totalConInteres / n).toFixed(2);
-  let rem = +(totalConInteres - base * (n - 1)).toFixed(2);
+  const cuotaBase = +(totalConInteres / n).toFixed(2);
+  let rem = +(totalConInteres - cuotaBase * (n - 1)).toFixed(2);
 
   state.cuotasForm = [];
   ui.tblCuotasBody.innerHTML = "";
   for (let i = 0; i < n; i++) {
-    const nro = i + 1;
+    const nro = i + 1; // empieza en 1
     const vto = i === 0 ? primerVto : addMonths(primerVto, i);
-    const monto = i === n - 1 ? rem : base;
+    const monto = i === n - 1 ? rem : cuotaBase;
     pushCuotaRow({ nro, venceEl: vto, monto });
   }
   recalcItems();
@@ -451,7 +490,7 @@ function pushCuotaRow(c) {
   ui.tblCuotasBody.append(tr);
 }
 
-// submit nueva venta
+// ==================== Submit nueva venta ====================
 ui.frmVenta?.addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const f = ui.frmVenta.elements;
@@ -475,11 +514,37 @@ ui.frmVenta?.addEventListener("submit", async (ev) => {
     return;
   }
 
+  // Si es crédito y no hay cuotas cargadas, generarlas automáticamente
   if (payload.tipoPago === "Credito") {
     if (state.cuotasForm.length === 0) {
-      alert("Generá o cargá cuotas para crédito.");
-      return;
+      const n = Math.max(1, Number(ui.frmVenta.cantidadCuotas.value || 1));
+      const interes = Number(ui.frmVenta.interes.value || 0);
+      const totalItems = sum(
+        state.itemsForm,
+        (r) => (r.cantidad || 0) * (r.precioUnit || 0)
+      );
+      const entrega = Number(ui.frmVenta.entrega?.value || 0);
+      const montoBase = Math.max(totalItems - entrega, 0);
+      const totalConInteres = +(
+        montoBase +
+        (montoBase * interes) / 100
+      ).toFixed(2);
+
+      const primerVto =
+        ui.frmVenta.primerVencimiento.value || toInputDate(new Date());
+      const cuotaBase = +(totalConInteres / n).toFixed(2);
+      let rem = +(totalConInteres - cuotaBase * (n - 1)).toFixed(2);
+
+      state.cuotasForm = [];
+      for (let i = 0; i < n; i++) {
+        state.cuotasForm.push({
+          nro: i + 1,
+          venceEl: i === 0 ? primerVto : addMonths(primerVto, i),
+          monto: i === n - 1 ? rem : cuotaBase,
+        });
+      }
     }
+
     payload.cuotas = state.cuotasForm.map((c) => ({
       nro: c.nro,
       venceEl: c.venceEl,
@@ -499,20 +564,29 @@ ui.frmVenta?.addEventListener("submit", async (ev) => {
       alert(data?.error || "No se pudo crear la venta");
       return;
     }
+
+    // Si es crédito y hay entrega, registrar como pago inicial
+    const entrega = Number(ui.frmVenta.entrega?.value || 0);
+    if (payload.tipoPago === "Credito" && entrega > 0 && data?.ventaId) {
+      try {
+        await fetch(`/api/ventas/${data.ventaId}/pagos`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ monto: entrega, fecha: payload.fecha }),
+        });
+      } catch (e) {
+        console.warn("No se pudo registrar la entrega automáticamente:", e);
+      }
+    }
+
     closeNueva();
     await refreshVentas();
-    if (data?.ventaId) {
-      openDetalle(data.ventaId);
-    }
+    if (data?.ventaId) openDetalle(data.ventaId);
   } catch (e) {
     console.error(e);
     alert("Error de red guardando venta");
   }
 });
-
-ui.btnAddItem?.addEventListener("click", addItemRow);
-ui.btnNueva?.addEventListener("click", openNueva);
-ui.btnCancelarVenta?.addEventListener("click", closeNueva);
 
 // ==================== Detalle de venta ====================
 async function openDetalle(id) {
@@ -527,7 +601,6 @@ async function openDetalle(id) {
     }
     const det = await r.json();
 
-    // cabecera
     const v = det.venta;
     ui.ventaCab.innerHTML = `
       <div><strong>Venta #${v.id}</strong> — ${formatDate(v.fecha)} — ${
@@ -541,7 +614,6 @@ async function openDetalle(id) {
       } (ID ${v.clienteId})</div>
     `;
 
-    // items
     ui.detItemsBody.innerHTML = "";
     det.items.forEach((it, i) => {
       const tr = document.createElement("tr");
@@ -554,7 +626,6 @@ async function openDetalle(id) {
       ui.detItemsBody.append(tr);
     });
 
-    // cuotas + pagos si es crédito
     const esCredito = String(v.tipoPago).toLowerCase() === "credito";
     ui.bloqueCuotas.style.display = esCredito ? "block" : "none";
     ui.detCuotasBody.innerHTML = "";
@@ -598,7 +669,6 @@ ui.btnCerrarDetalle?.addEventListener("click", () => {
 });
 
 // ==================== Pago ====================
-// === MODIFICADO: bloquea apertura si no corresponde
 function openPago(ventaId) {
   const venta = state.ventas.find((v) => v.id === ventaId);
   if (!venta) {
@@ -623,7 +693,6 @@ ui.btnCancelarPago?.addEventListener(
   () => (ui.boxPago.style.display = "none")
 );
 
-// === MODIFICADO: valida monto <= saldo antes de enviar
 ui.frmPago?.addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const f = ui.frmPago.elements;
@@ -637,7 +706,6 @@ ui.frmPago?.addEventListener("submit", async (ev) => {
     return;
   }
 
-  // Validaciones front extra
   const venta = state.ventas.find((v) => v.id === ventaId);
   if (!venta) {
     alert("Venta no encontrada");
@@ -682,16 +750,22 @@ async function refreshVentas() {
   renderListado();
 }
 
-// ==================== Eventos globales ====================
-ui.buscarVentas?.addEventListener(
-  "input",
-  debounce(() => {
-    state.filter = ui.buscarVentas.value || "";
-    renderListado();
-  }, 200)
-);
-
+// ==================== Eventos globales (enganches claves) ====================
 document.addEventListener("DOMContentLoaded", async () => {
   await loadBase();
   renderListado();
+
+  // Botones principales de "Nueva venta"
+  ui.btnNueva?.addEventListener("click", openNueva);
+  ui.btnCancelarVenta?.addEventListener("click", closeNueva);
+  ui.btnAddItem?.addEventListener("click", addItemRow);
+
+  // Buscar en el listado
+  ui.buscarVentas?.addEventListener(
+    "input",
+    debounce(() => {
+      state.filter = ui.buscarVentas.value || "";
+      renderListado();
+    }, 200)
+  );
 });
